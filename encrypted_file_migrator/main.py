@@ -1,7 +1,7 @@
 import argparse
 from getpass import getpass
 
-from .args import Args
+from .models.args import Args
 from .operations import OperationsFactory
 
 
@@ -38,6 +38,12 @@ def parse_args() -> Args:
         help="Path to the backup file that will be restored (restore phase)",
         default=None
     )
+    arg_parser.add_argument(
+        "--metadata-path",
+        help="Path to the metadata file "
+             "(defaults to the same path as the backup file)",
+        default=None
+    )
     args = arg_parser.parse_args()
 
     encryption_password = getpass(prompt="Enter the encryption password: ")
@@ -49,7 +55,8 @@ def parse_args() -> Args:
         manifest_path=args.manifest_path,
         exclude_manifest_path=args.exclude_manifest_path,
         destination_path=args.destination_path,
-        source_backup_path=args.source_backup_path
+        source_backup_path=args.source_backup_path,
+        metadata_path=args.metadata_path
     )
 
 
