@@ -140,7 +140,7 @@ class Backup(Operation):
     def execute(self) -> None:
         print("Calculating total size of files to backup...")
         with open(self.args.manifest_path, "r") as f:
-            files = [line.strip() for line in f.readlines()]
+            files = [line.strip() for line in f.readlines() if line.strip()]
 
         sizes = self._execute_command(self._du_command(files)).split("\n")
 
