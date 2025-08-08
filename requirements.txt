@@ -1,2 +1,4 @@
+wcmatch==10.1
+
 flake8
 mypy

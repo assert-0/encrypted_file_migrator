@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import os
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from getpass import getpass
 from typing import Type, List, Dict
@@ -11,7 +12,7 @@ from .consts import OperationType, METADATA_SUFFIX, MIGRATION_SUFFIX, \
 from .models.analysis import Analysis
 from .models.args import Args
 from .models.metadata import Metadata
-from .utils import to_engineering_notation
+from .utils import to_engineering_notation, FileIndexer
 
 
 class Operation(ABC):
@@ -43,6 +44,16 @@ class Operation(ABC):
 
         return procs
 
+    def _load_manifest(self, file: str) -> List[str]:
+        with open(file, "r") as f:
+            files = [
+                line.strip()
+                for line in f.readlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+
+        return files
+
     def _execute_command(self, command: List[str]) -> str:
         result = subprocess.run(command, capture_output=True)
         if result.returncode != 0:
@@ -62,14 +73,6 @@ class Operation(ABC):
             f"--average-rate",
             f"--eta",
             f"--size", f"{total_bytes}",
-        ]
-
-    def _du_command(self, files: List[str]) -> List[str]:
-        return [
-            f"du",
-            f"--total",
-            f"--block-size=1",
-            *files,
         ]
 
 
@@ -134,23 +137,38 @@ class Backup(Operation):
 
         if not self.args.metadata_path:
             self.args.metadata_path = (
-                    self.args.destination_path + METADATA_SUFFIX
+                self.args.destination_path + METADATA_SUFFIX
             )
 
     def execute(self) -> None:
-        print("Calculating total size of files to backup...")
-        with open(self.args.manifest_path, "r") as f:
-            files = [line.strip() for line in f.readlines() if line.strip()]
+        print("\nCalculating total size of files to backup...")
+        file_roots = self._load_manifest(self.args.manifest_path)
+        exclude_patterns = self._load_manifest(
+            self.args.exclude_manifest_path
+        ) if self.args.exclude_manifest_path else []
 
-        sizes = self._execute_command(self._du_command(files)).split("\n")
+        matched_files, size, missing_files = FileIndexer(
+            exclude_patterns=exclude_patterns, max_workers=self.args.threads
+        ).run(file_roots)
 
         # Extract the total size from last non-blank line
-        size = float(sizes[-2].split()[0])
 
+        print("================================================")
+        print("================================================")
+        print(f"Number of files to backup: {len(matched_files)}")
         print(
             f"Total size of files to backup: "
             f"{to_engineering_notation(size)} bytes"
         )
+
+        if missing_files:
+            print("The following files were not found:")
+            for file in missing_files:
+                print(f" - {file}")
+            print("These files will not be included in the backup.")
+
+        print("================================================")
+        print("================================================")
 
         continue_flag = input("Do you want to continue? [Y/n]: ")
         if continue_flag.lower() != "y" and continue_flag.strip() != "":
@@ -159,28 +177,26 @@ class Backup(Operation):
 
         print(f"Starting backup using {self.args.threads} threads...")
 
-        pipeline = self._create_pipeline(
-            [
-                self._tar_command(),
-                self._pv_command(int(size)),
-                self._zstd_command(),
-                self._openssl_command(self.args.destination_path),
-            ]
-        )
-        pipeline[-1].communicate()
+        with tempfile.NamedTemporaryFile() as file_list:
+            file_list.write("\n".join(matched_files).encode("utf-8"))
+
+            pipeline = self._create_pipeline(
+                [
+                    self._tar_command(file_list.name),
+                    self._pv_command(int(size)),
+                    self._zstd_command(),
+                    self._openssl_command(self.args.destination_path),
+                ]
+            )
+            pipeline[-1].communicate()
 
         print("Backup completed")
 
         print("Saving metadata...")
 
-        with open(self.args.exclude_manifest_path, "r") as f:
-            exclude_manifest_patterns = [
-                line.strip() for line in f.readlines()
-            ]
-
         metadata = Metadata(
-            input_manifest_files=files,
-            exclude_manifest_patterns=exclude_manifest_patterns,
+            input_manifest_files=file_roots,
+            exclude_manifest_patterns=exclude_patterns,
             total_size=int(size),
         )
 
@@ -197,20 +213,15 @@ class Backup(Operation):
         )
         zstd.communicate(input=metadata_json.encode())
 
-    def _tar_command(self) -> List[str]:
+    def _tar_command(self, file_list_path: str) -> List[str]:
         command = [
             f"tar",
             f"--create",
-            f"--verbose",
             f"--acls",
             f"--selinux",
             f"--xattrs",
             f"--absolute-names",
-            (
-                f"--exclude-from={self.args.exclude_manifest_path}"
-                if self.args.exclude_manifest_path else ""
-            ),
-            f"--files-from={self.args.manifest_path}",
+            f"--files-from={file_list_path}",
         ]
 
         return command

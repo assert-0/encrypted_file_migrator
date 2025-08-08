@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="encrypted_file_migrator",
-    version="1.1.1",
+    version="1.2.0",
     packages=find_packages(),
     install_requires=[],
     entry_points={
