@@ -259,9 +259,6 @@ class Restore(Operation):
                 f"does not exist"
             )
 
-        if self.args.threads < 1:
-            raise ValueError("Threads must be greater than 0")
-
         if not self.args.encryption_password:
             raise ValueError("Encryption password is required")
 
@@ -278,6 +275,35 @@ class Restore(Operation):
     def execute(self) -> None:
         print("Reading metadata...")
 
+        metadata = self._load_metadata()
+
+        print(
+            f"Size of backup: "
+            f"{to_engineering_notation(metadata.total_size)} bytes"
+        )
+
+        continue_flag = input("Do you want to continue? [Y/n]: ")
+        if not any([
+                continue_flag.lower().strip() == "y",
+                continue_flag.strip() == ""
+        ]):
+            print("Restore aborted")
+            return
+
+        print(f"Starting restore using {self.args.threads} threads...")
+
+        self._execute_restore(metadata)
+
+        print("Restore completed")
+
+        print("Analyzing restore conflicts (old files backed up)...")
+
+        self._analyze_restore_conflicts(metadata)
+
+        print("Analysis completed")
+        print(f"Analysis file saved to '{os.getcwd()}/{ANALYSIS_FILE}'")
+
+    def _load_metadata(self) -> Metadata:
         pipeline = self._create_pipeline(
             [
                 self._openssl_command(self.args.metadata_path),
@@ -286,20 +312,9 @@ class Restore(Operation):
         )
         metadata_json = pipeline[-1].communicate()[0].decode("utf-8")
         metadata_dict = json.loads(metadata_json)
-        metadata = Metadata.model_load(metadata_dict)
+        return Metadata.model_load(metadata_dict)
 
-        print(
-            f"Size of backup: "
-            f"{to_engineering_notation(metadata.total_size)} bytes"
-        )
-
-        continue_flag = input("Do you want to continue? [Y/n]: ")
-        if continue_flag.lower() != "y" and continue_flag.strip() != "":
-            print("Restore aborted")
-            return
-
-        print(f"Starting restore using {self.args.threads} threads...")
-
+    def _execute_restore(self, metadata: Metadata) -> None:
         pipeline = self._create_pipeline(
             [
                 self._openssl_command(self.args.source_backup_path),
@@ -310,10 +325,7 @@ class Restore(Operation):
         )
         pipeline[-1].communicate()
 
-        print("Restore completed")
-
-        print("Analyzing restore conflicts (old files backed up)...")
-
+    def _analyze_restore_conflicts(self, metadata: Metadata) -> None:
         conflicting_files = []
         for file in metadata.input_manifest_files:
             if os.path.isfile(file):
@@ -328,11 +340,8 @@ class Restore(Operation):
 
         analysis = Analysis(conflicting_files=conflicting_files)
         analysis_json = json.dumps(analysis.model_dump())
-        with open(ANALYSIS_FILE, "w") as f:
-            f.write(analysis_json)
-
-        print("Analysis completed")
-        print(f"Analysis file saved to '{os.getcwd()}/{ANALYSIS_FILE}'")
+        with open(ANALYSIS_FILE, "w") as analysis_file:
+            analysis_file.write(analysis_json)
 
     def _tar_command(self) -> List[str]:
         return [
@@ -353,7 +362,6 @@ class Restore(Operation):
         return [
             f"zstd",
             f"--decompress",
-            f"--threads={self.args.threads}",
             f"--stdout",
         ]
 
@@ -369,5 +377,64 @@ class Restore(Operation):
         ]
 
 
+class Check(Restore):
+    def execute(self) -> None:
+        print("Reading metadata...")
+
+        metadata = self._load_metadata()
+
+        print(
+            f"Size of backup: "
+            f"{to_engineering_notation(metadata.total_size)} bytes"
+        )
+        print(
+            f"Number of input manifest files: "
+            f"{len(metadata.input_manifest_files)}"
+        )
+        print("================================================")
+        print("Input manifest files:")
+        for file in metadata.input_manifest_files:
+            print(f" - {file}")
+        print("================================================")
+
+        continue_flag = input(
+            "Do you want to continue with integrity check? [y/N]: "
+        )
+        if continue_flag.lower().strip() != "y":
+            print("Integrity check aborted")
+            return
+
+        print(f"Starting integrity check...")
+        result = self._check_integrity()
+
+        print("Integrity check completed\n")
+
+        if result:
+            print("Backup integrity is valid")
+        else:
+            print("WARNING: Backup integrity is invalid!")
+
+    def _check_integrity(self) -> bool:
+        compressed_size = os.path.getsize(self.args.source_backup_path)
+
+        pipeline = self._create_pipeline(
+            [
+                self._openssl_command(self.args.source_backup_path),
+                self._pv_command(compressed_size),
+                self._zstd_test_command(),
+            ]
+        )
+        pipeline[-1].communicate()
+        return pipeline[-1].returncode == 0
+
+    def _zstd_test_command(self) -> List[str]:
+        return [
+            "zstd",
+            "--test",
+            "-q", "-q",
+        ]
+
+
 OperationsFactory.register_operation(OperationType.BACKUP, Backup)
 OperationsFactory.register_operation(OperationType.RESTORE, Restore)
+OperationsFactory.register_operation(OperationType.CHECK, Check)

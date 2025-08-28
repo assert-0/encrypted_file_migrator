@@ -8,7 +8,7 @@ from .operations import OperationsFactory
 def parse_args() -> Args:
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument(
-        "operation", choices=["backup", "restore"]
+        "operation", choices=["backup", "restore", "check"]
     )
     arg_parser.add_argument(
         "--threads", "-t",
